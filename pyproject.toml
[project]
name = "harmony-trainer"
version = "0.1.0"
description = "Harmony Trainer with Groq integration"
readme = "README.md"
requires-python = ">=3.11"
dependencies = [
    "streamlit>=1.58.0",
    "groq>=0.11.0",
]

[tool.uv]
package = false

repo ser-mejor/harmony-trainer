@@ -1,0 +1,154 @@
+import streamlit as st
+from groq import APIConnectionError, APIError, Groq, RateLimitError
+
+st.set_page_config(page_title="Harmony Trainer", page_icon="🎵")
+st.title("🎵 Harmony Trainer")
+
+
+# --------------------------------------------------
+# Utility: show a clear error console with cause + fix
+# --------------------------------------------------
+def show_error_console(title: str, cause: str, fix: str, action_label: str | None = None, action_url: str | None = None):
+    st.session_state["error_title"] = title
+    st.session_state["error_cause"] = cause
+    st.session_state["error_fix"] = fix
+    st.session_state["error_action_label"] = action_label
+    st.session_state["error_action_url"] = action_url
+
+    st.markdown("---")
+    with st.container(border=True):
+        st.error(f"**{title}**")
+        st.markdown("### Causa")
+        st.code(cause)
+        st.markdown("### Solución inmediata")
+        st.code(fix)
+        if action_url and action_label:
+            st.link_button(action_label, action_url)
+        if st.button("Reintentar", key=f"retry-{title.replace(' ', '-').lower()}"):
+            st.rerun()
+
+
+# --------------------------------------------------
+# Client factory with validation
+# --------------------------------------------------
+def get_client() -> Groq | None:
+    try:
+        if "GROQ_API_KEY" not in st.secrets:
+            show_error_console(
+                "Falta la clave de Groq",
+                "No existe la variable GROQ_API_KEY en .streamlit/secrets.toml.",
+                "Crea el archivo .streamlit/secrets.toml con:\n\nGROQ_API_KEY = \"TU_API_KEY_AQUI\"",
+                "Abrir Groq Console",
+                "https://console.groq.com/keys",
+            )
+            return None
+
+        api_key = st.secrets["GROQ_API_KEY"]
+        if not api_key or not str(api_key).strip():
+            show_error_console(
+                "La clave de Groq está vacía",
+                "La variable GROQ_API_KEY existe pero no tiene un valor válido.",
+                "Reemplaza el valor por tu clave real de Groq.",
+                "Abrir Groq Console",
+                "https://console.groq.com/keys",
+            )
+            return None
+
+        return Groq(api_key=str(api_key).strip())
+
+    except Exception as exc:  # broad fallback for unexpected config issues
+        show_error_console(
+            "No se pudo inicializar el cliente Groq",
+            f"Error inesperado al leer la configuración: {type(exc).__name__}: {exc}",
+            "Verifica que tu archivo .streamlit/secrets.toml exista y que GROQ_API_KEY sea válida.",
+            "Abrir Groq Console",
+            "https://console.groq.com/keys",
+        )
+        return None
+
+
+# --------------------------------------------------
+# Chat state
+# --------------------------------------------------
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+with st.sidebar:
+    st.header("Opciones")
+    if st.button("Limpiar chat"):
+        st.session_state.messages = []
+        st.rerun()
+
+# Render previous messages
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+
+prompt = st.chat_input("Escribí acordes, intervalos, ejercicios...")
+
+if prompt is None or not prompt.strip():
+    st.caption("Escribe un tema para comenzar.")
+    st.stop()
+
+st.session_state.messages.append({"role": "user", "content": prompt})
+with st.chat_message("user"):
+    st.markdown(prompt)
+
+client = get_client()
+if client is None:
+    st.stop()
+
+with st.chat_message("assistant"):
+    with st.spinner("Pensando..."):
+        try:
+            completion = client.chat.completions.create(
+                model="llama3-8b-8192",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Eres un entrenador de armonía musical. Responde en español, con claridad, ejemplos prácticos y ayudas para acordes, intervalos y ejercicios.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.7,
+                max_tokens=1024,
+            )
+            response = completion.choices[0].message.content
+            st.markdown(response)
+            st.session_state.messages.append({"role": "assistant", "content": response})
+
+        except RateLimitError as exc:
+            show_error_console(
+                "Límite de uso excedido",
+                f"Groq respondió con límite de velocidad: {exc}",
+                "Espera unos segundos y vuelve a intentarlo. Si sigue ocurriendo, cambia de modelo o reutiliza la clave en la consola de Groq.",
+                "Abrir Groq Console",
+                "https://console.groq.com/keys",
+            )
+
+        except APIConnectionError as exc:
+            show_error_console(
+                "Sin conexión con Groq",
+                f"La app no pudo alcanzar Groq: {exc}",
+                "Verifica tu conexión a internet, firewall o que el servicio de Groq esté disponible.",
+                "Comprobar estado del servicio",
+                "https://status.groq.com/",
+            )
+
+        except APIError as exc:
+            show_error_console(
+                "Error de API de Groq",
+                f"Groq devolvió un error: {exc}",
+                "Revisa el modelo, la cuenta y el formato de la petición. Si la clave está vencida, genera una nueva.",
+                "Abrir Groq Console",
+                "https://console.groq.com/keys",
+            )
+
+        except Exception as exc:
+            show_error_console(
+                "Error inesperado",
+                f"Excepción no controlada: {type(exc).__name__}: {exc}",
+                "Revisa la consola de la app y confirma que la configuración de Groq y el prompt sean correctos.",
+                "Reintentar",
+                None,
+            )
